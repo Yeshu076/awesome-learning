@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: linkedin_postgres
+    environment:
+      POSTGRES_DB: linkedin_automation
+      POSTGRES_USER: linkedin_user
+      POSTGRES_PASSWORD: linkedin_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - linkedin_network
+
+  # Redis for caching and Celery
+  redis:
+    image: redis:7-alpine
+    container_name: linkedin_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - linkedin_network
+
+  # FastAPI Backend
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: linkedin_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://linkedin_user:linkedin_pass@postgres:5432/linkedin_automation
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - linkedin_network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker for background tasks
+  celery_worker:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: linkedin_celery_worker
+    environment:
+      - DATABASE_URL=postgresql://linkedin_user:linkedin_pass@postgres:5432/linkedin_automation
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - linkedin_network
+    environment:
+      - DISPLAY=${DISPLAY}
+    command: celery -A app.celery.celery_app worker --loglevel=info
+
+  # Celery Beat for scheduled tasks
+  celery_beat:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: linkedin_celery_beat
+    environment:
+      - DATABASE_URL=postgresql://linkedin_user:linkedin_pass@postgres:5432/linkedin_automation
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - linkedin_network
+    command: celery -A app.celery.celery_app beat --loglevel=info
+
+  # React Frontend
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: linkedin_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+    depends_on:
+      - backend
+    networks:
+      - linkedin_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  linkedin_network:
+    driver: bridge
